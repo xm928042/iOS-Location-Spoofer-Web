@@ -1765,16 +1765,24 @@ $id('btn-config-copy-url').addEventListener('click', function() {
 
 $id('btn-config-restore').addEventListener('click', function() {
   var btn = $id('btn-config-restore');
+  if (btn.disabled) return;
+  var originalText = btn.textContent;
   btn.disabled = true;
+  btn.textContent = '还原中…';
   fetch(API('/restore'), { method: 'POST' })
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function() {
       lockedWGS = null;
       updateStatus();
+      btn.textContent = '已还原 ✓';
       toast('已还原真实定位，稍等几秒让系统重新定位');
+      setTimeout(function() { btn.textContent = originalText; btn.disabled = false; }, 1800);
     })
-    .catch(function() { toast('还原失败，请检查 Token'); })
-    .then(function() { btn.disabled = false; });
+    .catch(function() {
+      btn.textContent = '还原失败';
+      toast('还原失败，请检查 Token 或网络');
+      setTimeout(function() { btn.textContent = originalText; btn.disabled = false; }, 1800);
+    });
 });
 
 $id('btn-config-copy-arg').addEventListener('click', function() {
