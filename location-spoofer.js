@@ -868,6 +868,11 @@
     if (config.configUrl) {
       fetchRemoteConfig(config.configUrl, function (remoteData) {
         if (remoteData) {
+          // Web panel "restore real location": pass the original response through.
+          if (remoteData.enabled === false || remoteData.enabled === "false") {
+            passThrough();
+            return;
+          }
           if (remoteData.latitude != null) config.latitude = Number(remoteData.latitude);
           if (remoteData.longitude != null) config.longitude = Number(remoteData.longitude);
           if (remoteData.horizontalAccuracy != null) config.horizontalAccuracy = Number(remoteData.horizontalAccuracy);

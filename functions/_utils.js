@@ -11,7 +11,8 @@ export const DEFAULT_LOC = {
   longitude:          116.39748,
   altitude:           44,
   horizontalAccuracy: 39,
-  verticalAccuracy:   1000
+  verticalAccuracy:   1000,
+  enabled:            true
 };
 
 export function authOk(request, env) {
