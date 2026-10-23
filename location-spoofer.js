@@ -824,12 +824,13 @@
       headers["X-Location-Spoofer-Wifi"] = String(wifiCount);
       headers["X-Location-Spoofer-Cell"] = String(cellCount);
 
+      // Shadowrocket / Surge http-response scripts expect top-level fields.
+      // Wrapping in { response: {...} } is the http-request "short-circuit" form
+      // and is ignored here, which silently passes the original body through.
       $done({
-        response: {
-          status: 200,
-          headers: headers,
-          body: bodyBytes
-        }
+        status: 200,
+        headers: headers,
+        body: bodyBytes
       });
     }
 
