@@ -786,14 +786,19 @@
       callback(null);
       return;
     }
-    $httpClient.get({ url: url, timeout: 5 }, function (err, resp, data) {
-      if (err || !data || (resp && resp.status >= 400)) {
+    $httpClient.get({ url: url, timeout: 15 }, function (err, resp, data) {
+      if (err || data == null || (resp && resp.status >= 400)) {
         callback(null);
         return;
       }
       try {
-        var json = JSON.parse(data);
-        callback(json);
+        var text = data;
+        if (typeof text !== "string") {
+          // Shadowrocket may hand over the response body as Uint8Array/ArrayBuffer.
+          var bytes = ByteUtils.toUint8Array(text);
+          text = bytes ? ByteUtils.toBinaryString(bytes) : String(text);
+        }
+        callback(JSON.parse(text));
       } catch (e) {
         callback(null);
       }
@@ -867,6 +872,12 @@
 
     if (config.configUrl) {
       fetchRemoteConfig(config.configUrl, function (remoteData) {
+        if (!remoteData) {
+          // Fail open: never spoof with stale/default coordinates when the
+          // remote config cannot be read (e.g. the built-in Beijing default).
+          passThrough();
+          return;
+        }
         if (remoteData) {
           // Web panel "restore real location": pass the original response through.
           if (remoteData.enabled === false || remoteData.enabled === "false") {
