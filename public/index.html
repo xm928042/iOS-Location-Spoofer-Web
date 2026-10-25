@@ -1838,6 +1838,8 @@ $id('btn-config-copy-url').addEventListener('click', function() {
     .catch(function() { toast('复制失败，请手动选择复制'); });
 });
 
+var restoreClickedAt = 0;
+
 function pollRealLocation(attempt) {
   var el = $id('restore-real-loc');
   if (!el) return;
@@ -1857,7 +1859,18 @@ function pollRealLocation(attempt) {
         var ageSec = ts ? Math.max(0, Math.round((Date.now() - ts) / 1000)) : null;
         var ageText = ageSec == null ? '' : (ageSec < 60 ? ageSec + ' 秒前' : Math.round(ageSec / 60) + ' 分钟前');
         var acc = d.lastReal.horizontalAccuracy != null ? '，精度约 ' + Math.round(Number(d.lastReal.horizontalAccuracy)) + ' 米' : '';
-        el.textContent = '最后一次真实定位：' + Number(d.lastReal.latitude).toFixed(5) + ', ' + Number(d.lastReal.longitude).toFixed(5) + acc + (ageText ? '（' + ageText + '）' : '');
+        // 早于本次点击 2 分钟以上的记录视为旧数据，提示并继续等新位置
+        var isStale = restoreClickedAt && ts && ts < restoreClickedAt - 120000;
+        el.textContent = '最后一次真实定位：' + Number(d.lastReal.latitude).toFixed(5) + ', ' + Number(d.lastReal.longitude).toFixed(5) + acc + (ageText ? '（' + ageText + '）' : '') + (isStale ? ' —— 正在等待手机上报新位置…' : '');
+        el.style.cursor = 'pointer';
+        el.title = '点击在地图上查看';
+        el.onclick = function() {
+          var lat = Number(d.lastReal.latitude), lon = Number(d.lastReal.longitude);
+          var disp = (currentLayer === 'osm' || currentLayer === 'esri') ? [lat, lon] : GCJ.w2g(lat, lon);
+          map.setView(disp, 16, { animate: true });
+          toast('已跳转到最后一次真实定位');
+        };
+        if (isStale) setTimeout(function() { pollRealLocation(attempt + 1); }, 3000);
         return;
       }
       setTimeout(function() { pollRealLocation(attempt + 1); }, 3000);
@@ -1871,6 +1884,7 @@ $id('btn-config-restore').addEventListener('click', function() {
   var originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = '还原中…';
+  restoreClickedAt = Date.now();
   fetch(API('/restore'), { method: 'POST' })
     .then(function(r) { if (!r.ok) throw new Error(r.status); return r.json(); })
     .then(function() {
