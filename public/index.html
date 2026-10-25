@@ -1898,6 +1898,28 @@ $id('btn-config-copy-url').addEventListener('click', function() {
 
 var restoreClickedAt = 0;
 
+var vpnCountdownTimer = null;
+
+// 还原后 iOS 的 locationd 仍可能缓存旧位置。给用户一个等待窗口，
+// 等系统真正收到透传的真实坐标后再关闭 VPN。
+function startVpnCountdown(baseText) {
+  var el = $id('restore-real-loc');
+  if (!el) return;
+  if (vpnCountdownTimer) clearInterval(vpnCountdownTimer);
+  var remain = 30;
+  el.textContent = baseText + ' —— 建议 ' + remain + ' 秒后再关闭 VPN，让系统收到真实坐标';
+  vpnCountdownTimer = setInterval(function() {
+    remain -= 1;
+    if (remain <= 0) {
+      clearInterval(vpnCountdownTimer);
+      vpnCountdownTimer = null;
+      el.textContent = baseText + ' —— 现在可以关闭 VPN 了（不关 VPN 也能保持真实定位）';
+      return;
+    }
+    el.textContent = baseText + ' —— 建议 ' + remain + ' 秒后再关闭 VPN，让系统收到真实坐标';
+  }, 1000);
+}
+
 function pollRealLocation(attempt) {
   var el = $id('restore-real-loc');
   if (!el) return;
@@ -1919,7 +1941,9 @@ function pollRealLocation(attempt) {
         var acc = d.lastReal.horizontalAccuracy != null ? '，精度约 ' + Math.round(Number(d.lastReal.horizontalAccuracy)) + ' 米' : '';
         // 早于本次点击 2 分钟以上的记录视为旧数据，提示并继续等新位置
         var isStale = restoreClickedAt && ts && ts < restoreClickedAt - 120000;
-        el.textContent = '最后一次真实定位：' + Number(d.lastReal.latitude).toFixed(5) + ', ' + Number(d.lastReal.longitude).toFixed(5) + acc + (ageText ? '（' + ageText + '）' : '') + (isStale ? ' —— 正在等待手机上报新位置…' : '');
+        var baseText = '最后一次真实定位：' + Number(d.lastReal.latitude).toFixed(5) + ', ' + Number(d.lastReal.longitude).toFixed(5) + acc + (ageText ? '（' + ageText + '）' : '') + (isStale ? ' —— 正在等待手机上报新位置…' : '');
+        el.textContent = baseText;
+        if (!isStale) startVpnCountdown(baseText);
         el.style.cursor = 'pointer';
         el.title = '点击在地图上查看';
         el.onclick = function() {
