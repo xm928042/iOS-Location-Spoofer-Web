@@ -1319,6 +1319,8 @@ var HISTORY_KEY = 'ios_loc_spoofer_history';
 var amapUsable = true;   // 高德 Key 运行时探测；无效时本会话降级到 Nominatim
 var suggestTimer = null;
 var lastSuggestAt = 0;
+var suggestCache = {};          // q -> { at, tips }，减少高德配额消耗
+var SUGGEST_CACHE_TTL = 10 * 60 * 1000;
 
 function loadHistory() {
   try {
@@ -1409,6 +1411,29 @@ function formatDist(d) {
   return d < 1 ? Math.round(d * 1000) + 'm' : Math.round(d) + 'km';
 }
 
+function renderAmapTips(box, tips) {
+  box.innerHTML = '';
+  var count = 0;
+  (tips || []).forEach(function(it) {
+    if (!it.location || typeof it.location !== 'string') return;
+    var p = it.location.split(',');
+    var gcjLng = parseFloat(p[0]), gcjLat = parseFloat(p[1]);
+    if (!isFinite(gcjLat) || !isFinite(gcjLng)) return;
+    var row = document.createElement('div'); row.className = 'result-row';
+    row.innerHTML = '<div class="name">' + escHtml(it.name || '') + '</div>'
+                  + '<div class="sub">' + escHtml((it.district || '') + (it.address || '')) + '</div>';
+    row.addEventListener('click', function() {
+      var disp = (currentLayer === 'osm' || currentLayer === 'esri') ? GCJ.g2w(gcjLat, gcjLng) : [gcjLat, gcjLng];
+      map.setView([disp[0], disp[1]], 16, { animate: true });
+      box.style.display = 'none';
+      $id('search-input').value = '';
+    });
+    box.appendChild(row);
+    count += 1;
+  });
+  return count;
+}
+
 function renderNominatimResults(box, list) {
   box.innerHTML='';
   if(!list||!list.length){
@@ -1488,23 +1513,7 @@ function doSearch(){
           searchNominatim(q, box);
           return;
         }
-        d.tips.forEach(function(it){
-          if (!it.location || typeof it.location !== 'string') return;
-          var row=document.createElement('div');row.className='result-row';
-          var locParts = it.location.split(',');
-          var gcjLng = parseFloat(locParts[0]);
-          var gcjLat = parseFloat(locParts[1]);
-          row.innerHTML='<div class="name">'+escHtml(it.name)+'</div>'
-                       +'<div class="sub">'+escHtml((it.district || '') + (it.address || ''))+'</div>';
-          row.addEventListener('click',function(){
-            var disp = (currentLayer === 'osm'||currentLayer === 'esri') ? GCJ.g2w(gcjLat, gcjLng) : [gcjLat, gcjLng];
-            map.setView([disp[0], disp[1]], 16, {animate:true});
-            box.style.display='none';
-            $id('search-input').value='';
-          });
-          box.appendChild(row);
-        });
-        if (!box.children.length) {
+        if (!renderAmapTips(box, d.tips)) {
           searchNominatim(q, box);
         }
       }).catch(function(){
@@ -1522,10 +1531,15 @@ $id('search-input').addEventListener('input', function() {
   if (q.length < 2) return;
   suggestTimer = setTimeout(function() {
     var now = Date.now();
-    if (now - lastSuggestAt < 1000) return;
+    if (now - lastSuggestAt < 2000) return;
     lastSuggestAt = now;
     var box = $id('search-results');
     if (AMAP_KEY && amapUsable) {
+      var cached = suggestCache[q];
+      if (cached && Date.now() - cached.at < SUGGEST_CACHE_TTL) {
+        if (renderAmapTips(box, cached.tips)) box.style.display='block';
+        return;
+      }
       var sugCenter = getSearchCenter();
       var sugLoc = sugCenter ? ('&location='+sugCenter.gcjLng.toFixed(6)+','+sugCenter.gcjLat.toFixed(6)) : '';
       fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+sugLoc+'&key='+AMAP_KEY)
@@ -1546,24 +1560,10 @@ $id('search-input').addEventListener('input', function() {
             return;
           }
           if ($id('search-input').value.trim() !== q) return;
-          box.innerHTML='';
-          var count = 0;
-          (d.tips || []).forEach(function(it){
-            if (!it.location || typeof it.location !== 'string') return;
-            var p = it.location.split(',');
-            var gcjLng = parseFloat(p[0]), gcjLat = parseFloat(p[1]);
-            var row = document.createElement('div'); row.className='result-row';
-            row.innerHTML='<div class="name">'+escHtml(it.name)+'</div>'
-                         +'<div class="sub">'+escHtml((it.district||'')+(it.address||''))+'</div>';
-            row.addEventListener('click', function(){
-              var disp = (currentLayer === 'osm'||currentLayer === 'esri') ? GCJ.g2w(gcjLat, gcjLng) : [gcjLat, gcjLng];
-              map.setView([disp[0], disp[1]], 16, {animate:true});
-              box.style.display='none';
-              $id('search-input').value='';
-            });
-            box.appendChild(row); count++;
-          });
-          if (count) box.style.display='block';
+          var cacheKeys = Object.keys(suggestCache);
+          if (cacheKeys.length >= 100) delete suggestCache[cacheKeys[0]];
+          suggestCache[q] = { at: Date.now(), tips: d.tips || [] };
+          if (renderAmapTips(box, d.tips)) box.style.display='block';
         }).catch(function(){});
     } else {
       fetch('/geocode?q='+encodeURIComponent(q))
@@ -1576,7 +1576,7 @@ $id('search-input').addEventListener('input', function() {
           box.style.display='block';
         }).catch(function(){});
     }
-  }, 550);
+  }, 800);
 });
 $id('search-input').addEventListener('focus', function() {
   if(searchHistory.length > 0) {
