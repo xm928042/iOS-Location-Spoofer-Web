@@ -1363,6 +1363,51 @@ window.clearHistory = function(e) {
   $id('search-input').focus();
 }
 
+function getSearchCenter() {
+  try {
+    var c = map.getCenter();
+    if (currentLayer === 'osm' || currentLayer === 'esri') {
+      var g = GCJ.w2g(c.lat, c.lng);
+      return { wgsLat: c.lat, wgsLng: c.lng, gcjLat: g[0], gcjLng: g[1] };
+    }
+    var w = GCJ.g2w(c.lat, c.lng);
+    return { wgsLat: w[0], wgsLng: w[1], gcjLat: c.lat, gcjLng: c.lng };
+  } catch (e) {
+    return null;
+  }
+}
+
+function distanceKm(lat1, lon1, lat2, lon2) {
+  var R = 6371;
+  var dLat = (lat2 - lat1) * Math.PI / 180;
+  var dLon = (lon2 - lon1) * Math.PI / 180;
+  var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+          Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// 本地地市优先，其次省级，最后其余；同层按距离由近到远
+function sortByLocalPriority(list, center) {
+  if (!center || !list || !list.length) return list;
+  list.forEach(function(it) {
+    var la = parseFloat(it.lat), lo = parseFloat(it.lon);
+    it._dist = (isFinite(la) && isFinite(lo)) ? distanceKm(center.wgsLat, center.wgsLng, la, lo) : Infinity;
+  });
+  function tier(d) { return d < 50 ? 0 : (d < 300 ? 1 : 2); }
+  list.sort(function(a, b) {
+    var ta = tier(a._dist), tb = tier(b._dist);
+    if (ta !== tb) return ta - tb;
+    return a._dist - b._dist;
+  });
+  return list;
+}
+
+function formatDist(d) {
+  if (d == null || !isFinite(d)) return '';
+  return d < 1 ? Math.round(d * 1000) + 'm' : Math.round(d) + 'km';
+}
+
 function renderNominatimResults(box, list) {
   box.innerHTML='';
   if(!list||!list.length){
@@ -1372,8 +1417,10 @@ function renderNominatimResults(box, list) {
   list.forEach(function(it){
     var row=document.createElement('div');row.className='result-row';
     var parts=(it.display_name||'').split(',');
+    var subText = parts.slice(1,3).join(',');
+    var distText = formatDist(it._dist);
     row.innerHTML='<div class="name">'+escHtml(parts[0]||'')+'</div>'
-                 +'<div class="sub">'+escHtml(parts.slice(1,3).join(','))+'</div>';
+                 +'<div class="sub">'+escHtml(subText)+(distText ? ' · '+distText : '')+'</div>';
     row.addEventListener('click',function(){
       var wLat=+it.lat,wLng=+it.lon;
       var disp=(currentLayer==='osm'||currentLayer==='esri')?[wLat,wLng]:GCJ.w2g(wLat,wLng);
@@ -1386,9 +1433,13 @@ function renderNominatimResults(box, list) {
 }
 
 function searchNominatim(q, box, limit) {
-  fetch('https://nominatim.openstreetmap.org/search?format=json&limit='+(limit||6)+'&accept-language=zh&q='+encodeURIComponent(q))
+  var center = getSearchCenter();
+  fetch('/geocode?q='+encodeURIComponent(q))
     .then(function(r){return r.json();})
-    .then(function(a){ renderNominatimResults(box, a); })
+    .then(function(a){
+      sortByLocalPriority(a, center);
+      renderNominatimResults(box, a.slice(0, limit||6));
+    })
     .catch(function(){
       box.innerHTML='<div class="result-row"><span class="name">搜索失败，请重试</span></div>';
     });
@@ -1420,7 +1471,9 @@ function doSearch(){
   box.style.display='block';
 
   if (AMAP_KEY && amapUsable) {
-    fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+'&key='+AMAP_KEY)
+    var amapCenter = getSearchCenter();
+    var amapLoc = amapCenter ? ('&location='+amapCenter.gcjLng.toFixed(6)+','+amapCenter.gcjLat.toFixed(6)) : '';
+    fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+amapLoc+'&key='+AMAP_KEY)
       .then(function(r){return r.json();})
       .then(function(d){
         if(d.status !== '1'){
@@ -1468,22 +1521,25 @@ $id('search-input').addEventListener('input', function() {
   if (q.length < 2) return;
   suggestTimer = setTimeout(function() {
     var now = Date.now();
-    if (now - lastSuggestAt < 1500) return;
+    if (now - lastSuggestAt < 1000) return;
     lastSuggestAt = now;
     var box = $id('search-results');
     if (AMAP_KEY && amapUsable) {
-      fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+'&key='+AMAP_KEY)
+      var sugCenter = getSearchCenter();
+      var sugLoc = sugCenter ? ('&location='+sugCenter.gcjLng.toFixed(6)+','+sugCenter.gcjLat.toFixed(6)) : '';
+      fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+sugLoc+'&key='+AMAP_KEY)
         .then(function(r){return r.json();})
         .then(function(d){
           if (d.status !== '1') {
             amapUsable = false;
             // 高德 Key 无效时立即降级到 Nominatim，别等下一次输入
-            fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&accept-language=zh&q='+encodeURIComponent(q))
+            fetch('/geocode?q='+encodeURIComponent(q))
               .then(function(r){return r.json();})
               .then(function(a){
                 if ($id('search-input').value.trim() !== q) return;
                 if (!a || !a.length) return;
-                renderNominatimResults(box, a);
+                sortByLocalPriority(a, sugCenter);
+                renderNominatimResults(box, a.slice(0, 5));
                 box.style.display='block';
               }).catch(function(){});
             return;
@@ -1509,16 +1565,17 @@ $id('search-input').addEventListener('input', function() {
           if (count) box.style.display='block';
         }).catch(function(){});
     } else {
-      fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&accept-language=zh&q='+encodeURIComponent(q))
+      fetch('/geocode?q='+encodeURIComponent(q))
         .then(function(r){return r.json();})
         .then(function(a){
           if ($id('search-input').value.trim() !== q) return;
           if (!a || !a.length) return;
-          renderNominatimResults(box, a);
+          sortByLocalPriority(a, sugCenter);
+          renderNominatimResults(box, a.slice(0, 5));
           box.style.display='block';
         }).catch(function(){});
     }
-  }, 900);
+  }, 550);
 });
 $id('search-input').addEventListener('focus', function() {
   if(searchHistory.length > 0) {
