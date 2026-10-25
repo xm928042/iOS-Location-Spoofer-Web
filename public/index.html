@@ -1475,7 +1475,19 @@ $id('search-input').addEventListener('input', function() {
       fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+'&key='+AMAP_KEY)
         .then(function(r){return r.json();})
         .then(function(d){
-          if (d.status !== '1') { amapUsable = false; return; }
+          if (d.status !== '1') {
+            amapUsable = false;
+            // 高德 Key 无效时立即降级到 Nominatim，别等下一次输入
+            fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&accept-language=zh&q='+encodeURIComponent(q))
+              .then(function(r){return r.json();})
+              .then(function(a){
+                if ($id('search-input').value.trim() !== q) return;
+                if (!a || !a.length) return;
+                renderNominatimResults(box, a);
+                box.style.display='block';
+              }).catch(function(){});
+            return;
+          }
           if ($id('search-input').value.trim() !== q) return;
           box.innerHTML='';
           var count = 0;
