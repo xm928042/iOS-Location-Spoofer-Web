@@ -659,6 +659,56 @@
     return null;
   }
 
+  // 从 Apple 的 WLOC 响应中读取真实坐标（只读，不修改响应）。
+  // 还原真实定位时用来上报"最后一次真实定位"，网页据此显示。
+  function extractRealCoords(responseBytes) {
+    var extraction = null;
+    try {
+      extraction = extractEnvelope(responseBytes);
+    } catch (e) {
+      return null;
+    }
+    if (!extraction) return null;
+
+    function readLocFromEntity(entityBytes, locFieldNumber) {
+      var fields = ProtobufEngine.readFields(entityBytes);
+      for (var i = 0; i < fields.length; i += 1) {
+        var f = fields[i];
+        if (f.fieldNumber !== locFieldNumber || f.wireType !== 2) continue;
+        var locFields = ProtobufEngine.readFields(f.valueBytes);
+        var lat = null, lon = null, acc = null;
+        for (var j = 0; j < locFields.length; j += 1) {
+          var lf = locFields[j];
+          if (lf.fieldNumber === 1 && lf.wireType === 0) lat = lf.int64Value / 1e8;
+          if (lf.fieldNumber === 2 && lf.wireType === 0) lon = lf.int64Value / 1e8;
+          if (lf.fieldNumber === 3 && lf.wireType === 0) acc = lf.int64Value;
+        }
+        if (lat != null && lon != null && Math.abs(lat) <= 90 && Math.abs(lon) <= 180 && (lat !== 0 || lon !== 0)) {
+          return { latitude: lat, longitude: lon, horizontalAccuracy: acc };
+        }
+      }
+      return null;
+    }
+
+    try {
+      var payloadFields = ProtobufEngine.readFields(extraction.payload);
+      for (var k = 0; k < payloadFields.length; k += 1) {
+        var pf = payloadFields[k];
+        if (pf.wireType !== 2) continue;
+        if (pf.fieldNumber === 2) {
+          var wifiLoc = readLocFromEntity(pf.valueBytes, 2);
+          if (wifiLoc) return wifiLoc;
+        } else if (CELL_RESPONSE_TAGS[pf.fieldNumber]) {
+          var cellLoc = readLocFromEntity(pf.valueBytes, 5);
+          if (cellLoc) return cellLoc;
+        }
+      }
+    } catch (e) {
+      return null;
+    }
+    return null;
+  }
+
   function spoofAppleResponse(responseBytes, rawConfig) {
     var config = normalizeConfig(rawConfig);
     var extraction = null;
@@ -781,6 +831,56 @@
   /* ─────────────────────────────────────────────────────────────
      8. Shadowrocket 运行时接入 (Shadowrocket Runtime Integration)
   ───────────────────────────────────────────────────────────── */
+  function deriveReportUrl(configUrl) {
+    if (!configUrl || configUrl.indexOf("/loc.json") < 0) return null;
+    return configUrl.replace("/loc.json", "/report");
+  }
+
+  function shouldReportNow() {
+    try {
+      if (typeof $persistentStore === "undefined" || !$persistentStore) return true;
+      var last = Number($persistentStore.read("lsLastReportAt") || 0);
+      if (last && Date.now() - last < 5 * 60 * 1000) return false;
+      $persistentStore.write(String(Date.now()), "lsLastReportAt");
+      return true;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  // 上报真实坐标。done 可选：有 $persistentStore 做 5 分钟节流时等待回调
+  // （最多 2 秒），保证上报可靠；没有节流能力时传 null，不阻塞定位响应。
+  function reportRealLocation(config, coords, done) {
+    var finished = false;
+    var timer = null;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      if (timer && typeof clearTimeout === "function") clearTimeout(timer);
+      if (typeof done === "function") done();
+    }
+    if (!config || !config.configUrl || typeof $httpClient === "undefined") { finish(); return; }
+    if (!shouldReportNow()) { finish(); return; }
+    var url = deriveReportUrl(config.configUrl);
+    if (!url) { finish(); return; }
+    try {
+      $httpClient.post({
+        url: url,
+        timeout: 2,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          latitude: coords.latitude,
+          longitude: coords.longitude,
+          horizontalAccuracy: coords.horizontalAccuracy,
+          timestamp: Date.now()
+        })
+      }, function () { finish(); });
+      if (typeof setTimeout === "function") timer = setTimeout(finish, 2000);
+    } catch (e) {
+      finish();
+    }
+  }
+
   function fetchRemoteConfig(url, callback) {
     if (!url || typeof $httpClient === "undefined") {
       callback(null);
@@ -881,6 +981,25 @@
         if (remoteData) {
           // Web panel "restore real location": pass the original response through.
           if (remoteData.enabled === false || remoteData.enabled === "false") {
+            // 还原真实定位：Apple 的原始响应里就是真实坐标，顺手解析并上报，
+            // 网页据此显示"最后一次真实定位"。上报不阻塞，失败也不影响透传。
+            var reportCoords = null;
+            try {
+              var realBody = ByteUtils.toUint8Array(($response && $response.body != null) ? $response.body : ($response && $response.bodyBytes));
+              reportCoords = realBody ? extractRealCoords(realBody) : null;
+            } catch (e) {}
+            if (reportCoords) {
+              var canThrottle = false;
+              try { canThrottle = typeof $persistentStore !== "undefined" && !!$persistentStore; } catch (e) {}
+              if (canThrottle) {
+                // 5 分钟才上报一次，最多等 2 秒，换取上报可靠性
+                reportRealLocation(config, reportCoords, passThrough);
+              } else {
+                reportRealLocation(config, reportCoords, null);
+                passThrough();
+              }
+              return;
+            }
             passThrough();
             return;
           }
@@ -919,6 +1038,7 @@
     scanPatchRawBuffer: scanPatchRawBuffer,
     extractEnvelope: extractEnvelope,
     spoofAppleResponse: spoofAppleResponse,
+    extractRealCoords: extractRealCoords,
     uint64ToSignedNumber: Varint64.toSignedNumber,
     // 兼容测试套件别名
     concatBytes: ByteUtils.concat,

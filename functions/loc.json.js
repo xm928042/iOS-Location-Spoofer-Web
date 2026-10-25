@@ -16,11 +16,15 @@ export async function onRequestGet(context) {
   }
 
   let loc = DEFAULT_LOC;
+  let lastReal = null;
   if (env.SPOOFER_DATA) {
     loc = await env.SPOOFER_DATA.get('loc', { type: 'json' }) || DEFAULT_LOC;
+    lastReal = await env.SPOOFER_DATA.get('lastReal', { type: 'json' }) || null;
   }
 
-  return jsonResponse(loc);
+  // `lastReal` is ignored by the Shadowrocket script; the web panel uses it to
+  // show where the phone really is after "restore real location".
+  return jsonResponse({ ...loc, lastReal });
 }
 
 export async function onRequestOptions() {

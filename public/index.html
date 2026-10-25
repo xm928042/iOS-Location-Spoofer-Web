@@ -1032,6 +1032,7 @@ html.dark #search-results::-webkit-scrollbar-thumb {
       <div class="config-title">还原真实定位</div>
       <div class="config-desc">停止改写坐标，让 iPhone 恢复真实定位。下次在地图上锁定位置时会自动恢复模拟。</div>
       <button class="config-action-btn" id="btn-config-restore">还原真实定位</button>
+      <div class="config-desc" id="restore-real-loc" style="display:none;margin-top:10px;line-height:1.6;"></div>
     </div>
     <div class="config-section" style="border-bottom:none;">
       <div id="dark-toggle">
@@ -1314,6 +1315,9 @@ function switchLayer(name){
 var searchDebounce=null;
 var searchHistory = [];
 var HISTORY_KEY = 'ios_loc_spoofer_history';
+var amapUsable = true;   // 高德 Key 运行时探测；无效时本会话降级到 Nominatim
+var suggestTimer = null;
+var lastSuggestAt = 0;
 
 function loadHistory() {
   try {
@@ -1359,6 +1363,37 @@ window.clearHistory = function(e) {
   $id('search-input').focus();
 }
 
+function renderNominatimResults(box, list) {
+  box.innerHTML='';
+  if(!list||!list.length){
+    box.innerHTML='<div class="result-row"><span class="name">未找到结果</span></div>';
+    return;
+  }
+  list.forEach(function(it){
+    var row=document.createElement('div');row.className='result-row';
+    var parts=(it.display_name||'').split(',');
+    row.innerHTML='<div class="name">'+escHtml(parts[0]||'')+'</div>'
+                 +'<div class="sub">'+escHtml(parts.slice(1,3).join(','))+'</div>';
+    row.addEventListener('click',function(){
+      var wLat=+it.lat,wLng=+it.lon;
+      var disp=(currentLayer==='osm'||currentLayer==='esri')?[wLat,wLng]:GCJ.w2g(wLat,wLng);
+      map.setView([disp[0], disp[1]], 16, {animate:true});
+      $id('search-results').style.display='none';
+      $id('search-input').value='';
+    });
+    box.appendChild(row);
+  });
+}
+
+function searchNominatim(q, box, limit) {
+  fetch('https://nominatim.openstreetmap.org/search?format=json&limit='+(limit||6)+'&accept-language=zh&q='+encodeURIComponent(q))
+    .then(function(r){return r.json();})
+    .then(function(a){ renderNominatimResults(box, a); })
+    .catch(function(){
+      box.innerHTML='<div class="result-row"><span class="name">搜索失败，请重试</span></div>';
+    });
+}
+
 function doSearch(){
   var q=$id('search-input').value.trim();
   if(!q)return;
@@ -1384,13 +1419,19 @@ function doSearch(){
   box.innerHTML='<div class="result-row"><span class="name">搜索中…</span></div>';
   box.style.display='block';
 
-  if (AMAP_KEY) {
+  if (AMAP_KEY && amapUsable) {
     fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+'&key='+AMAP_KEY)
       .then(function(r){return r.json();})
       .then(function(d){
+        if(d.status !== '1'){
+          // Key 平台类型不匹配或额度用尽：本会话降级到 Nominatim，避免完全搜不到
+          amapUsable = false;
+          searchNominatim(q, box);
+          return;
+        }
         box.innerHTML='';
-        if(d.status !== '1' || !d.tips || !d.tips.length){
-          box.innerHTML='<div class="result-row"><span class="name">未找到结果</span></div>';
+        if(!d.tips || !d.tips.length){
+          searchNominatim(q, box);
           return;
         }
         d.tips.forEach(function(it){
@@ -1410,41 +1451,63 @@ function doSearch(){
           box.appendChild(row);
         });
         if (!box.children.length) {
-          box.innerHTML='<div class="result-row"><span class="name">无有效定位结果</span></div>';
+          searchNominatim(q, box);
         }
       }).catch(function(){
-        box.innerHTML='<div class="result-row"><span class="name">搜索失败，请重试</span></div>';
+        searchNominatim(q, box);
       });
   } else {
-    fetch('https://nominatim.openstreetmap.org/search?format=json&limit=6&q='+encodeURIComponent(q))
-      .then(function(r){return r.json();})
-      .then(function(a){
-        box.innerHTML='';
-        if(!a||!a.length){
-          box.innerHTML='<div class="result-row"><span class="name">未找到结果 (国内搜索建议配置高德 Key)</span></div>';
-          return;
-        }
-        a.forEach(function(it){
-          var row=document.createElement('div');row.className='result-row';
-          var parts=it.display_name.split(',');
-          row.innerHTML='<div class="name">'+parts[0]+'</div>'
-                       +'<div class="sub">'+parts.slice(1,3).join(',')+'</div>';
-          row.addEventListener('click',function(){
-            var wLat=+it.lat,wLng=+it.lon;
-            var disp=(currentLayer==='osm'||currentLayer==='esri')?[wLat,wLng]:GCJ.w2g(wLat,wLng);
-            map.setView([disp[0], disp[1]], 16, {animate:true});
-            box.style.display='none';
-            $id('search-input').value='';
-          });
-          box.appendChild(row);
-        });
-      }).catch(function(){
-        box.innerHTML='<div class="result-row"><span class="name">搜索失败，请重试</span></div>';
-      });
+    searchNominatim(q, box);
   }
 }
 $id('search-btn').addEventListener('click',doSearch);
 $id('search-input').addEventListener('keydown',function(e){if(e.key==='Enter')doSearch();});
+$id('search-input').addEventListener('input', function() {
+  var q = this.value.trim();
+  clearTimeout(suggestTimer);
+  if (q.length < 2) return;
+  suggestTimer = setTimeout(function() {
+    var now = Date.now();
+    if (now - lastSuggestAt < 1500) return;
+    lastSuggestAt = now;
+    var box = $id('search-results');
+    if (AMAP_KEY && amapUsable) {
+      fetch('https://restapi.amap.com/v3/assistant/inputtips?keywords='+encodeURIComponent(q)+'&key='+AMAP_KEY)
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if (d.status !== '1') { amapUsable = false; return; }
+          if ($id('search-input').value.trim() !== q) return;
+          box.innerHTML='';
+          var count = 0;
+          (d.tips || []).forEach(function(it){
+            if (!it.location || typeof it.location !== 'string') return;
+            var p = it.location.split(',');
+            var gcjLng = parseFloat(p[0]), gcjLat = parseFloat(p[1]);
+            var row = document.createElement('div'); row.className='result-row';
+            row.innerHTML='<div class="name">'+escHtml(it.name)+'</div>'
+                         +'<div class="sub">'+escHtml((it.district||'')+(it.address||''))+'</div>';
+            row.addEventListener('click', function(){
+              var disp = (currentLayer === 'osm'||currentLayer === 'esri') ? GCJ.g2w(gcjLat, gcjLng) : [gcjLat, gcjLng];
+              map.setView([disp[0], disp[1]], 16, {animate:true});
+              box.style.display='none';
+              $id('search-input').value='';
+            });
+            box.appendChild(row); count++;
+          });
+          if (count) box.style.display='block';
+        }).catch(function(){});
+    } else {
+      fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&accept-language=zh&q='+encodeURIComponent(q))
+        .then(function(r){return r.json();})
+        .then(function(a){
+          if ($id('search-input').value.trim() !== q) return;
+          if (!a || !a.length) return;
+          renderNominatimResults(box, a);
+          box.style.display='block';
+        }).catch(function(){});
+    }
+  }, 900);
+});
 $id('search-input').addEventListener('focus', function() {
   if(searchHistory.length > 0) {
     $id('search-history').classList.remove('hidden');
@@ -1763,6 +1826,33 @@ $id('btn-config-copy-url').addEventListener('click', function() {
     .catch(function() { toast('复制失败，请手动选择复制'); });
 });
 
+function pollRealLocation(attempt) {
+  var el = $id('restore-real-loc');
+  if (!el) return;
+  if (attempt === 0) {
+    el.textContent = '正在等待手机上报实时位置…';
+    el.style.display = 'block';
+  }
+  if (attempt > 10) {
+    el.textContent = '未收到手机的实时位置。请确认 Shadowrocket 模块已启用，且手机刚发起过定位（可打开地图 App 触发一次）。';
+    return;
+  }
+  fetch(API('/loc.json'))
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(d) {
+      if (d && d.lastReal && isFinite(Number(d.lastReal.latitude)) && isFinite(Number(d.lastReal.longitude))) {
+        var ts = Number(d.lastReal.timestamp || 0);
+        var ageSec = ts ? Math.max(0, Math.round((Date.now() - ts) / 1000)) : null;
+        var ageText = ageSec == null ? '' : (ageSec < 60 ? ageSec + ' 秒前' : Math.round(ageSec / 60) + ' 分钟前');
+        var acc = d.lastReal.horizontalAccuracy != null ? '，精度约 ' + Math.round(Number(d.lastReal.horizontalAccuracy)) + ' 米' : '';
+        el.textContent = '最后一次真实定位：' + Number(d.lastReal.latitude).toFixed(5) + ', ' + Number(d.lastReal.longitude).toFixed(5) + acc + (ageText ? '（' + ageText + '）' : '');
+        return;
+      }
+      setTimeout(function() { pollRealLocation(attempt + 1); }, 3000);
+    })
+    .catch(function() { setTimeout(function() { pollRealLocation(attempt + 1); }, 3000); });
+}
+
 $id('btn-config-restore').addEventListener('click', function() {
   var btn = $id('btn-config-restore');
   if (btn.disabled) return;
@@ -1776,6 +1866,7 @@ $id('btn-config-restore').addEventListener('click', function() {
       updateStatus();
       btn.textContent = '已还原 ✓';
       toast('已还原真实定位，稍等几秒让系统重新定位');
+      pollRealLocation(0);
       setTimeout(function() { btn.textContent = originalText; btn.disabled = false; }, 1800);
     })
     .catch(function() {
